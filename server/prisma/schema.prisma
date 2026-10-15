@@ -1,0 +1,287 @@
+// TaskFlow — Employee Task Assistance & Workflow Platform
+// SQLite has no native enums, so enum-like fields are strings; allowed values are listed beside each.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         String // ADMIN | MANAGER | TEAM_LEAD | EMPLOYEE
+  active       Boolean  @default(true)
+  avatarUrl    String? // e.g. /api/avatars/<uuid>.png
+  activitySeenAt DateTime? // last visit to Work history; newer activity shows as a count in the sidebar
+  createdAt    DateTime @default(now())
+
+  teamId String?
+  team   Team?   @relation("TeamMembers", fields: [teamId], references: [id], onDelete: SetNull)
+
+  managedTeams      Team[]         @relation("TeamManager")
+  ledTeams          Team[]         @relation("TeamLead")
+  managedClients    Client[]
+  managedProjects   Project[]
+  createdTasks      Task[]         @relation("TaskCreator")
+  assignedTasks     Task[]         @relation("TaskAssignee")
+  timeLogs          TimeLog[]
+  reportedIssues    Issue[]        @relation("IssueReporter")
+  resolvedIssues    Issue[]        @relation("IssueResolver")
+  attachments       Attachment[]
+  notifications     Notification[]
+  activities        Activity[]
+  schedulesCreated  Schedule[]     @relation("ScheduleCreator")
+  schedulesAssigned Schedule[]     @relation("ScheduleAssignee")
+  schedulesTargeted Schedule[]     @relation("ScheduleRecipientUser")
+  channelsCreated   Channel[]      @relation("ChannelCreator")
+  channelMembers    ChannelMember[]
+  messages          Message[]
+}
+
+model Team {
+  id          String   @id @default(cuid())
+  name        String
+  description String   @default("")
+  createdAt   DateTime @default(now())
+
+  managerId String?
+  manager   User?   @relation("TeamManager", fields: [managerId], references: [id], onDelete: SetNull)
+  leadId    String?
+  lead      User?   @relation("TeamLead", fields: [leadId], references: [id], onDelete: SetNull)
+
+  members   User[]     @relation("TeamMembers")
+  tasks     Task[]
+  schedules Schedule[]
+}
+
+model Client {
+  id          String   @id @default(cuid())
+  name        String
+  description String   @default("")
+  createdAt   DateTime @default(now())
+
+  managerId String?
+  manager   User?   @relation(fields: [managerId], references: [id], onDelete: SetNull)
+
+  projects    Project[]
+  tasks       Task[]
+  attachments Attachment[]
+  schedules   Schedule[]
+}
+
+model Project {
+  id          String   @id @default(cuid())
+  name        String
+  description String   @default("")
+  createdAt   DateTime @default(now())
+
+  clientId  String?
+  client    Client? @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  managerId String?
+  manager   User?   @relation(fields: [managerId], references: [id], onDelete: SetNull)
+
+  tasks       Task[]
+  attachments Attachment[]
+  schedules   Schedule[]
+}
+
+model Task {
+  id              String    @id @default(cuid())
+  title           String
+  description     String    @default("")
+  notes           String    @default("")
+  status          String    @default("NEW") // NEW | IN_PROGRESS | BLOCKED | COMPLETED
+  priority        String    @default("MEDIUM") // LOW | MEDIUM | HIGH | URGENT
+  dueDate         DateTime?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  totalSeconds    Int       @default(0)
+  finalNotes      String    @default("")
+  dueReminderSent Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  creatorId  String
+  creator    User      @relation("TaskCreator", fields: [creatorId], references: [id])
+  assigneeId String
+  assignee   User      @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  teamId     String?
+  team       Team?     @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  clientId   String?
+  client     Client?   @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  projectId  String?
+  project    Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  scheduleId String?
+  schedule   Schedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+
+  timeLogs    TimeLog[]
+  issues      Issue[]
+  attachments Attachment[]
+  activities  Activity[]
+
+  @@index([assigneeId, status])
+  @@index([dueDate])
+}
+
+model TimeLog {
+  id        String    @id @default(cuid())
+  startedAt DateTime  @default(now())
+  endedAt   DateTime?
+  seconds   Int       @default(0)
+
+  taskId String
+  task   Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+}
+
+model Issue {
+  id          String    @id @default(cuid())
+  description String
+  status      String    @default("OPEN") // OPEN | RESOLVED
+  resolution  String    @default("")
+  createdAt   DateTime  @default(now())
+  resolvedAt  DateTime?
+
+  taskId     String
+  task       Task    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  reporterId String
+  reporter   User    @relation("IssueReporter", fields: [reporterId], references: [id])
+  resolverId String?
+  resolver   User?   @relation("IssueResolver", fields: [resolverId], references: [id])
+}
+
+model Attachment {
+  id           String   @id @default(cuid())
+  storedName   String
+  originalName String
+  mimeType     String
+  size         Int
+  createdAt    DateTime @default(now())
+
+  uploaderId String
+  uploader   User     @relation(fields: [uploaderId], references: [id])
+  taskId     String?
+  task       Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  projectId  String?
+  project    Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  clientId   String?
+  client     Client?  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+}
+
+// A calendar entry. ONCE = a single future task/event; other frequencies repeat until endAt.
+// When assigneeId is set, the scheduler creates a real task instance at each occurrence.
+// Recipients get the "upcoming" reminder (USER, TEAM or EVERYONE in the creator's scope).
+model Schedule {
+  id                  String    @id @default(cuid())
+  title               String
+  description         String    @default("")
+  notes               String    @default("")
+  priority            String    @default("MEDIUM")
+  startAt             DateTime
+  frequency           String    @default("ONCE") // ONCE | DAILY | WEEKLY | MONTHLY
+  interval            Int       @default(1) // every N days / weeks / months
+  weekdays            String    @default("") // WEEKLY only, e.g. "1,3,5" (0 = Sunday)
+  endAt               DateTime?
+  dueInHours          Int       @default(24)
+  remindMinutesBefore Int       @default(60)
+  recipientType       String    @default("USER") // USER | TEAM | EVERYONE
+  nextRunAt           DateTime?
+  lastRunAt           DateTime?
+  remindedFor         DateTime?
+  active              Boolean   @default(true)
+  createdAt           DateTime  @default(now())
+
+  createdById     String
+  createdBy       User     @relation("ScheduleCreator", fields: [createdById], references: [id])
+  assigneeId      String?
+  assignee        User?    @relation("ScheduleAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  recipientUserId String?
+  recipientUser   User?    @relation("ScheduleRecipientUser", fields: [recipientUserId], references: [id], onDelete: SetNull)
+  recipientTeamId String?
+  recipientTeam   Team?    @relation(fields: [recipientTeamId], references: [id], onDelete: SetNull)
+  clientId        String?
+  client          Client?  @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  projectId       String?
+  project         Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+
+  tasks Task[]
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  title     String
+  body      String   @default("")
+  link      String?
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read])
+}
+
+model Activity {
+  id        String   @id @default(cuid())
+  action    String // e.g. task.created, task.started, issue.reported
+  message   String
+  createdAt DateTime @default(now())
+
+  actorId String?
+  actor   User?   @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  taskId  String?
+  task    Task?   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt])
+}
+
+// Chat. PUBLIC channels are open to every active user; PRIVATE ones only to members.
+// DIRECT is a one-to-one conversation; dmKey ("<idA>:<idB>", sorted) keeps it unique.
+model Channel {
+  id            String   @id @default(cuid())
+  name          String
+  description   String   @default("")
+  kind          String   @default("PUBLIC") // PUBLIC | PRIVATE | DIRECT
+  dmKey         String?  @unique
+  createdAt     DateTime @default(now())
+  lastMessageAt DateTime @default(now())
+
+  createdById String?
+  createdBy   User?   @relation("ChannelCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  members  ChannelMember[]
+  messages Message[]
+}
+
+model ChannelMember {
+  joinedAt   DateTime @default(now())
+  lastReadAt DateTime @default(now())
+
+  channelId String
+  channel   Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([channelId, userId])
+  @@index([userId])
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  body      String
+  createdAt DateTime @default(now())
+
+  channelId String
+  channel   Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User    @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([channelId, createdAt])
+}
